@@ -1,10 +1,13 @@
 package gemara
 
 import (
+	"encoding/json"
 	"testing"
 
+	"github.com/gemaraproj/go-gemara/internal/codec"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	yaml3 "gopkg.in/yaml.v3"
 )
 
 func getAssessmentsTestData() []struct {
@@ -624,4 +627,80 @@ func TestRunWithoutEvidence(t *testing.T) {
 			assert.Empty(t, a.Evidence)
 		})
 	}
+}
+
+// TestAssessmentStepRoundTrip covers the defect that made a published
+// EvaluationLog unreadable: steps marshalled to their function names but had no
+// decoder. The name assertions are also what catch a decodedStepPC that has
+// stopped identifying decoded steps.
+func TestAssessmentStepRoundTrip(t *testing.T) {
+	want := AssessmentStep(passingAssessmentStep).String()
+	require.NotEmpty(t, want)
+	require.NotContains(t, want, "decodedStep", "sanity: want the real step name, not the decoder closure")
+
+	in := AssessmentLog{
+		Requirement:   EntryMapping{EntryId: "test"},
+		Description:   "round trip",
+		Applicability: testingApplicability,
+		Result:        Passed,
+		Steps:         []AssessmentStep{passingAssessmentStep},
+	}
+
+	// Each decoder reaches AssessmentStep by a different method: encoding/json via
+	// UnmarshalJSON, goccy/go-yaml via the BytesUnmarshaler signature, and the
+	// yaml.v3 family via encoding.TextUnmarshaler.
+	codecs := []struct {
+		name      string
+		marshal   func(interface{}) ([]byte, error)
+		unmarshal func([]byte, interface{}) error
+	}{
+		{"json", json.Marshal, json.Unmarshal},
+		{"goccy-yaml", codec.MarshalYAML, codec.UnmarshalYAML},
+		{"yaml.v3", yaml3.Marshal, yaml3.Unmarshal},
+	}
+
+	for _, c := range codecs {
+		t.Run(c.name, func(t *testing.T) {
+			data, err := c.marshal(in)
+			require.NoError(t, err)
+
+			var out AssessmentLog
+			require.NoError(t, c.unmarshal(data, &out))
+			require.Len(t, out.Steps, 1)
+			assert.Equal(t, want, out.Steps[0].String(), "step name must survive decoding")
+
+			// Re-encoding a decoded log must reproduce the same bytes, or a log that
+			// passes through this package is corrupted by the trip.
+			again, err := c.marshal(out)
+			require.NoError(t, err)
+			assert.Equal(t, string(data), string(again), "round trip must be lossless")
+		})
+	}
+
+	// A decoded log has names but no functions, so running it must fail loudly
+	// rather than report a result it never assessed.
+	t.Run("decoded log is not runnable", func(t *testing.T) {
+		data, err := json.Marshal(in)
+		require.NoError(t, err)
+		var out AssessmentLog
+		require.NoError(t, json.Unmarshal(data, &out))
+
+		assert.Equal(t, Unknown, out.Run(nil))
+		assert.Equal(t, Undetermined, out.ConfidenceLevel)
+		assert.Contains(t, out.Message, "cannot be re-run")
+		assert.Zero(t, out.StepsExecuted, "no step should have been invoked")
+	})
+
+	// The probe is an internal detail; a consumer step must never receive it.
+	t.Run("real steps are never probed", func(t *testing.T) {
+		var sawProbe bool
+		step := AssessmentStep(func(payload interface{}) (Result, string, ConfidenceLevel) {
+			if _, ok := payload.(stepNameProbe); ok {
+				sawProbe = true
+			}
+			return Passed, "ok", High
+		})
+		_ = step.String()
+		assert.False(t, sawProbe, "String must not invoke a consumer's step")
+	})
 }

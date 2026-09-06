@@ -7,11 +7,44 @@ import (
 	"reflect"
 	"runtime"
 	"time"
+
+	"github.com/gemaraproj/go-gemara/internal/codec"
 )
 
 // AssessmentStep is a function type that inspects the provided targetData and returns a Result with a message and confidence level.
 // The message may be an error string or other descriptive text.
 type AssessmentStep func(payload interface{}) (Result, string, ConfidenceLevel)
+
+// stepNameProbe is the sentinel payload that asks a decoded step for its name.
+type stepNameProbe struct{}
+
+// decodedStep is the step a log decodes into. AssessmentStep is a function type,
+// so the recorded name has nowhere to live but inside the function itself: the
+// closure captures it and returns it when probed.
+//
+// A function is not recoverable from its name, so a decoded step reports Unknown
+// rather than pretending to assess anything.
+func decodedStep(name string) AssessmentStep {
+	return func(payload interface{}) (Result, string, ConfidenceLevel) {
+		if _, ok := payload.(stepNameProbe); ok {
+			return Unknown, name, Undetermined
+		}
+		return Unknown, decodedStepMessage, Undetermined
+	}
+}
+
+const decodedStepMessage = "assessment step was decoded from a log, which records step names only, and cannot be re-run"
+
+// decodedStepPC is the code pointer every closure returned by decodedStep shares,
+// which is how String tells a decoded step from one a consumer wrote. A toolchain
+// that stopped sharing it would break that identification; the round-trip test
+// is what catches it.
+var decodedStepPC = reflect.ValueOf(decodedStep("")).Pointer()
+
+// isDecoded reports whether the step came from a log rather than from a consumer.
+func (as AssessmentStep) isDecoded() bool {
+	return as != nil && reflect.ValueOf(as).Pointer() == decodedStepPC
+}
 
 // EvidenceCollector is an embeddable helper that gives a targetData payload the
 // well-known evidence location and satisfies HasEvidence via method promotion,
@@ -73,12 +106,47 @@ type HasEvidence interface {
 }
 
 func (as AssessmentStep) String() string {
+	// The recorded name lives inside the closure, not in its symbol.
+	if as.isDecoded() {
+		_, name, _ := as(stepNameProbe{})
+		return name
+	}
 	// Get the function pointer correctly
 	fn := runtime.FuncForPC(reflect.ValueOf(as).Pointer())
 	if fn == nil {
 		return "<unknown function>"
 	}
 	return fn.Name()
+}
+
+// UnmarshalJSON reads the step name the log recorded. The spec declares the wire
+// type as a string (evaluationlog.cue: `#AssessmentStep: string`).
+func (as *AssessmentStep) UnmarshalJSON(data []byte) error {
+	var name string
+	if err := json.Unmarshal(data, &name); err != nil {
+		return err
+	}
+	*as = decodedStep(name)
+	return nil
+}
+
+// UnmarshalYAML is the YAML half of UnmarshalJSON, using the goccy/go-yaml
+// BytesUnmarshaler signature the enums in this package already use.
+func (as *AssessmentStep) UnmarshalYAML(data []byte) error {
+	var name string
+	if err := codec.UnmarshalYAML(data, &name); err != nil {
+		return err
+	}
+	*as = decodedStep(name)
+	return nil
+}
+
+// UnmarshalText lets yaml.v3-family decoders, which honor
+// encoding.TextUnmarshaler for scalars rather than the signature above,
+// deserialize a step name.
+func (as *AssessmentStep) UnmarshalText(data []byte) error {
+	*as = decodedStep(string(data))
+	return nil
 }
 
 func (as AssessmentStep) MarshalJSON() ([]byte, error) {
@@ -185,6 +253,17 @@ func (a *AssessmentLog) precheck() error {
 		a.Message = message
 		a.ConfidenceLevel = Undetermined
 		return errors.New(message)
+	}
+
+	// A decoded log has step names but no functions to run.
+	for _, step := range a.Steps {
+		if step.isDecoded() {
+			message := fmt.Sprintf("%s: %q", decodedStepMessage, step)
+			a.Result = Unknown
+			a.Message = message
+			a.ConfidenceLevel = Undetermined
+			return errors.New(message)
+		}
 	}
 
 	return nil
