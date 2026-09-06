@@ -704,3 +704,63 @@ func TestAssessmentStepRoundTrip(t *testing.T) {
 		assert.False(t, sawProbe, "String must not invoke a consumer's step")
 	})
 }
+
+// TestDecodedLogRefusalIsInert checks that refusing to run a decoded log leaves
+// the record it was decoded from intact. Stamping Start before precheck gave a
+// refused log a fresh start beside its original end, so it read as having
+// finished five minutes before it began.
+func TestDecodedLogRefusalIsInert(t *testing.T) {
+	const wire = `{"requirement":{"reference-id":"","entry-id":"r"},"description":"d",` +
+		`"result":"Passed","message":"m","applicability":["a"],` +
+		`"start":"2020-01-01T00:00:00Z","end":"2020-01-01T00:05:00Z",` +
+		`"steps-executed":1,"steps":["pkg.Step"]}`
+
+	var log AssessmentLog
+	require.NoError(t, json.Unmarshal([]byte(wire), &log))
+
+	assert.Equal(t, Unknown, log.Run(nil))
+	assert.Equal(t, Datetime("2020-01-01T00:00:00Z"), log.Start, "a refused log keeps its recorded start")
+	assert.Equal(t, Datetime("2020-01-01T00:05:00Z"), log.End, "and its recorded end")
+	assert.Contains(t, log.Message, "cannot be re-run")
+}
+
+// TestAssessmentStepNullDecodesToNil checks that a null step stays nil instead
+// of becoming a non-nil step with an empty name, which would slip past a
+// caller's nil check -- gemaraconv/sarif.go guards on nil before calling
+// String() to build a SARIF logical location.
+func TestAssessmentStepNullDecodesToNil(t *testing.T) {
+	t.Run("json", func(t *testing.T) {
+		var step AssessmentStep
+		require.NoError(t, json.Unmarshal([]byte("null"), &step))
+		assert.Nil(t, step)
+	})
+
+	t.Run("goccy-yaml", func(t *testing.T) {
+		var doc struct {
+			Steps []AssessmentStep `yaml:"steps"`
+		}
+		require.NoError(t, codec.UnmarshalYAML([]byte("steps:\n  - null\n"), &doc))
+		require.Len(t, doc.Steps, 1)
+		assert.Nil(t, doc.Steps[0])
+	})
+
+	t.Run("yaml.v3", func(t *testing.T) {
+		var doc struct {
+			Steps []AssessmentStep `yaml:"steps"`
+		}
+		require.NoError(t, yaml3.Unmarshal([]byte("steps:\n  - null\n"), &doc))
+		// yaml.v3 drops the entry rather than keeping a nil one. Either shape is
+		// fine; what matters is that no empty-named step is produced.
+		for _, step := range doc.Steps {
+			assert.Nil(t, step)
+		}
+	})
+
+	// An explicitly empty name is a name, not a null, and must still decode.
+	t.Run("empty name is not null", func(t *testing.T) {
+		var step AssessmentStep
+		require.NoError(t, json.Unmarshal([]byte(`""`), &step))
+		require.NotNil(t, step)
+		assert.Empty(t, step.String())
+	})
+}

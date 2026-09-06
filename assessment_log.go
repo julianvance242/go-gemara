@@ -122,6 +122,13 @@ func (as AssessmentStep) String() string {
 // UnmarshalJSON reads the step name the log recorded. The spec declares the wire
 // type as a string (evaluationlog.cue: `#AssessmentStep: string`).
 func (as *AssessmentStep) UnmarshalJSON(data []byte) error {
+	// A null leaves the step nil, as encoding/json expects of an Unmarshaler,
+	// so it does not decode into a non-nil step with an empty name that would
+	// pass a caller's nil check.
+	if string(data) == "null" {
+		return nil
+	}
+
 	var name string
 	if err := json.Unmarshal(data, &name); err != nil {
 		return err
@@ -133,6 +140,13 @@ func (as *AssessmentStep) UnmarshalJSON(data []byte) error {
 // UnmarshalYAML is the YAML half of UnmarshalJSON, using the goccy/go-yaml
 // BytesUnmarshaler signature the enums in this package already use.
 func (as *AssessmentStep) UnmarshalYAML(data []byte) error {
+	// goccy passes no bytes for a YAML null (null, ~, or an empty value) and
+	// two for an explicit "", so this leaves a null nil without disturbing a
+	// genuinely empty name.
+	if len(data) == 0 {
+		return nil
+	}
+
 	var name string
 	if err := codec.UnmarshalYAML(data, &name); err != nil {
 		return err
@@ -209,13 +223,18 @@ func (a *AssessmentLog) runStep(targetData interface{}, step AssessmentStep) Res
 func (a *AssessmentLog) Run(targetData interface{}) Result {
 	a.Result = NotRun
 
-	a.Start = Datetime(time.Now().Format(time.RFC3339))
+	// Stamp Start only once precheck has passed. A refused log keeps the start
+	// and end it was decoded with: stamping first left a decoded log with a new
+	// start beside its original end, which reads as having finished before it
+	// began.
 	err := a.precheck()
 	if err != nil {
 		a.Result = Unknown
 		a.ConfidenceLevel = Undetermined
 		return a.Result
 	}
+
+	a.Start = Datetime(time.Now().Format(time.RFC3339))
 
 	// Stamp the end time on every path that ran at least one step, including the
 	// early returns below.
