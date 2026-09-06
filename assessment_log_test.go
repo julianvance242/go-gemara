@@ -646,9 +646,8 @@ func TestAssessmentStepRoundTrip(t *testing.T) {
 		Steps:         []AssessmentStep{passingAssessmentStep},
 	}
 
-	// Each decoder reaches AssessmentStep by a different method: encoding/json via
-	// UnmarshalJSON, goccy/go-yaml via the BytesUnmarshaler signature, and the
-	// yaml.v3 family via encoding.TextUnmarshaler.
+	// goccy/go-yaml reaches AssessmentStep via the BytesUnmarshaler signature;
+	// encoding/json and yaml.v3 both reach it via encoding.TextUnmarshaler.
 	codecs := []struct {
 		name      string
 		marshal   func(interface{}) ([]byte, error)
@@ -762,5 +761,46 @@ func TestAssessmentStepNullDecodesToNil(t *testing.T) {
 		require.NoError(t, json.Unmarshal([]byte(`""`), &step))
 		require.NotNil(t, step)
 		assert.Empty(t, step.String())
+	})
+}
+
+// TestNilStepIsRefused checks that a nil step is rejected by precheck instead of
+// panicking in runStep.
+func TestNilStepIsRefused(t *testing.T) {
+	a, err := NewAssessment("r", "d", testingApplicability, []AssessmentStep{nil})
+	require.Error(t, err, "a nil step must not pass NewAssessment")
+	assert.Contains(t, err.Error(), "step 0 is nil")
+
+	assert.NotPanics(t, func() {
+		assert.Equal(t, Unknown, a.Run(nil))
+	})
+	assert.Equal(t, Undetermined, a.ConfidenceLevel)
+	assert.Zero(t, a.StepsExecuted, "no step should have been invoked")
+}
+
+// TestMalformedStepDiagnostics locks in the reason AssessmentStep has an
+// UnmarshalYAML but deliberately no UnmarshalJSON: each decoder's own error is
+// better than one routed through an inner unmarshal. Re-adding UnmarshalJSON, or
+// dropping UnmarshalYAML, degrades one of these.
+func TestMalformedStepDiagnostics(t *testing.T) {
+	t.Run("json names the field and type", func(t *testing.T) {
+		var doc struct {
+			Steps []AssessmentStep `json:"steps"`
+		}
+		err := json.Unmarshal([]byte(`{"steps":[123]}`), &doc)
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), ".steps.0", "error must locate the bad entry")
+		assert.Contains(t, err.Error(), "AssessmentStep", "error must name the real type")
+	})
+
+	t.Run("goccy reports the source position", func(t *testing.T) {
+		var doc struct {
+			Steps []AssessmentStep `yaml:"steps"`
+		}
+		err := codec.UnmarshalYAML([]byte("steps:\n  - [nested, seq]\n"), &doc)
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "Steps", "error must name the field")
+		assert.NotContains(t, err.Error(), "does not implemented Unmarshaler",
+			"goccy's fallback error carries no position; UnmarshalYAML exists to avoid it")
 	})
 }

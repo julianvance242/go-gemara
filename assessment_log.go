@@ -119,26 +119,15 @@ func (as AssessmentStep) String() string {
 	return fn.Name()
 }
 
-// UnmarshalJSON reads the step name the log recorded. The spec declares the wire
+// UnmarshalYAML reads the step name the log recorded. The spec declares the wire
 // type as a string (evaluationlog.cue: `#AssessmentStep: string`).
-func (as *AssessmentStep) UnmarshalJSON(data []byte) error {
-	// A null leaves the step nil, as encoding/json expects of an Unmarshaler,
-	// so it does not decode into a non-nil step with an empty name that would
-	// pass a caller's nil check.
-	if string(data) == "null" {
-		return nil
-	}
-
-	var name string
-	if err := json.Unmarshal(data, &name); err != nil {
-		return err
-	}
-	*as = decodedStep(name)
-	return nil
-}
-
-// UnmarshalYAML is the YAML half of UnmarshalJSON, using the goccy/go-yaml
-// BytesUnmarshaler signature the enums in this package already use.
+//
+// UnmarshalText below would satisfy goccy on its own, so this method exists for
+// its diagnostics: goccy reports the source position and the offending type only
+// when the target implements its BytesUnmarshaler. Without it a malformed step
+// fails with "does not implemented Unmarshaler" and no line or column, instead of
+// "[1:1] cannot unmarshal []interface {} into Go struct field .Steps of type
+// string" with the offending line quoted.
 func (as *AssessmentStep) UnmarshalYAML(data []byte) error {
 	// goccy passes no bytes for a YAML null (null, ~, or an empty value) and
 	// two for an explicit "", so this leaves a null nil without disturbing a
@@ -155,9 +144,15 @@ func (as *AssessmentStep) UnmarshalYAML(data []byte) error {
 	return nil
 }
 
-// UnmarshalText lets yaml.v3-family decoders, which honor
-// encoding.TextUnmarshaler for scalars rather than the signature above,
-// deserialize a step name.
+// UnmarshalText decodes a step name for encoding/json and for the yaml.v3 family,
+// both of which honor encoding.TextUnmarshaler for scalar values.
+//
+// There is deliberately no UnmarshalJSON: it would only shadow this method with a
+// worse error, because decoding through an inner json.Unmarshal loses the field
+// path and type name encoding/json otherwise reports -- "cannot unmarshal number
+// into Go value of type string" in place of "cannot unmarshal number into
+// .steps.0 of type gemara.AssessmentStep". Both decoders skip this method for a
+// null, which leaves the step nil.
 func (as *AssessmentStep) UnmarshalText(data []byte) error {
 	*as = decodedStep(string(data))
 	return nil
@@ -274,15 +269,22 @@ func (a *AssessmentLog) precheck() error {
 		return errors.New(message)
 	}
 
-	// A decoded log has step names but no functions to run.
-	for _, step := range a.Steps {
-		if step.isDecoded() {
-			message := fmt.Sprintf("%s: %q", decodedStepMessage, step)
-			a.Result = Unknown
-			a.Message = message
-			a.ConfidenceLevel = Undetermined
-			return errors.New(message)
+	// A decoded log has step names but no functions to run, and a nil step would
+	// panic in runStep rather than report anything.
+	for i, step := range a.Steps {
+		var message string
+		switch {
+		case step == nil:
+			message = fmt.Sprintf("step %d is nil", i)
+		case step.isDecoded():
+			message = fmt.Sprintf("%s: %q", decodedStepMessage, step)
+		default:
+			continue
 		}
+		a.Result = Unknown
+		a.Message = message
+		a.ConfidenceLevel = Undetermined
+		return errors.New(message)
 	}
 
 	return nil
