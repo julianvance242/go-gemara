@@ -216,12 +216,22 @@ func (a *AssessmentLog) runStep(targetData interface{}, step AssessmentStep) Res
 // Failed or NotApplicable. Every other result aggregates into a.Result via
 // UpdateAggregateResult and execution continues.
 func (a *AssessmentLog) Run(targetData interface{}) Result {
+	// A decoded log is the record of a run that already happened, not a runnable
+	// assessment, so refuse it without writing to the fields it was decoded with.
+	// This has to precede every assignment below, a.Result included: overwriting
+	// a completed record's result, message and confidence to report that it
+	// cannot be re-run destroys the very thing the caller loaded. Callers that
+	// want the reason ask Runnable first.
+	for _, step := range a.Steps {
+		if step.isDecoded() {
+			return Unknown
+		}
+	}
+
 	a.Result = NotRun
 
-	// Stamp Start only once precheck has passed. A refused log keeps the start
-	// and end it was decoded with: stamping first left a decoded log with a new
-	// start beside its original end, which reads as having finished before it
-	// began.
+	// Stamp Start only once precheck has passed, so a log refused below keeps
+	// the start and end it already had.
 	err := a.precheck()
 	if err != nil {
 		a.Result = Unknown
@@ -269,23 +279,32 @@ func (a *AssessmentLog) precheck() error {
 		return errors.New(message)
 	}
 
-	// A decoded log has step names but no functions to run, and a nil step would
-	// panic in runStep rather than report anything.
-	for i, step := range a.Steps {
-		var message string
-		switch {
-		case step == nil:
-			message = fmt.Sprintf("step %d is nil", i)
-		case step.isDecoded():
-			message = fmt.Sprintf("%s: %q", decodedStepMessage, step)
-		default:
-			continue
-		}
+	// Reaching here means the log was built in process rather than decoded, so it
+	// has no recorded state to protect and reporting into it is what it is for.
+	if err := a.Runnable(); err != nil {
 		a.Result = Unknown
-		a.Message = message
+		a.Message = err.Error()
 		a.ConfidenceLevel = Undetermined
-		return errors.New(message)
+		return err
 	}
 
+	return nil
+}
+
+// Runnable reports why the assessment cannot be executed, or nil if it can. It
+// does not modify the log, so a caller may ask before Run and decide what to do
+// with a log that Run will refuse.
+//
+// A log decoded from JSON or YAML records step names only, so its steps cannot be
+// re-run; a nil step would panic in runStep.
+func (a *AssessmentLog) Runnable() error {
+	for i, step := range a.Steps {
+		switch {
+		case step == nil:
+			return fmt.Errorf("step %d is nil", i)
+		case step.isDecoded():
+			return fmt.Errorf("%s: %q", decodedStepMessage, step)
+		}
+	}
 	return nil
 }

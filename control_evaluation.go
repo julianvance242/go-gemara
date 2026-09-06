@@ -38,6 +38,18 @@ func (c *ControlEvaluation) Evaluate(targetData interface{}, userApplicability [
 			}
 		}
 		if applicable {
+			// Ask before running: Run refuses a decoded log without recording why,
+			// precisely so it does not overwrite the record. Read the reason here
+			// instead, and leave the assessment untouched.
+			if err := assessment.Runnable(); err != nil {
+				aggregateResult := UpdateAggregateResult(c.Result, Unknown)
+				if aggregateResult != c.Result {
+					c.Message = err.Error()
+				}
+				c.Result = aggregateResult
+				continue
+			}
+
 			result := assessment.Run(targetData)
 			aggregateResult := UpdateAggregateResult(c.Result, result)
 			if aggregateResult != c.Result {

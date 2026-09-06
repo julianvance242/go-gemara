@@ -1,7 +1,11 @@
 package gemara
 
 import (
+	"encoding/json"
 	"testing"
+
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
 var controlEvaluationTestData = []struct {
@@ -262,4 +266,26 @@ func TestAddAssesment(t *testing.T) {
 		t.Errorf("Expected error message to be 'expected all AssessmentLog fields to have a value, but got: requirementId=len(4), description=len=(4), applicability=len(0), steps=len(0)', but instead it was '%v'", controlEvaluationTestData[0].control.Message)
 	}
 
+}
+
+// TestEvaluateDecodedAssessmentIsNonDestructive checks that evaluating a control
+// whose assessments were decoded from a log reports why they cannot run without
+// rewriting the records themselves.
+func TestEvaluateDecodedAssessmentIsNonDestructive(t *testing.T) {
+	const wire = `{"requirement":{"reference-id":"c","entry-id":"c-1"},"description":"d",` +
+		`"result":"Passed","message":"all checks passed","applicability":["a"],` +
+		`"confidence-level":"High","steps-executed":3,"steps":["pkg.StepA"]}`
+
+	var log AssessmentLog
+	require.NoError(t, json.Unmarshal([]byte(wire), &log))
+
+	control := &ControlEvaluation{Result: NotRun, AssessmentLogs: []*AssessmentLog{&log}}
+	control.Evaluate(nil, []string{"a"})
+
+	assert.Equal(t, Unknown, control.Result, "the control cannot be evaluated from a decoded log")
+	assert.Contains(t, control.Message, "cannot be re-run", "the reason surfaces on the control")
+
+	assert.Equal(t, Passed, log.Result, "the decoded assessment keeps its recorded result")
+	assert.Equal(t, "all checks passed", log.Message, "and its recorded message")
+	assert.Equal(t, High, log.ConfidenceLevel, "and its recorded confidence")
 }

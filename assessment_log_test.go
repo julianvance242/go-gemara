@@ -685,9 +685,11 @@ func TestAssessmentStepRoundTrip(t *testing.T) {
 		require.NoError(t, json.Unmarshal(data, &out))
 
 		assert.Equal(t, Unknown, out.Run(nil))
-		assert.Equal(t, Undetermined, out.ConfidenceLevel)
-		assert.Contains(t, out.Message, "cannot be re-run")
+		assert.Equal(t, Passed, out.Result, "Run must not overwrite the decoded record")
 		assert.Zero(t, out.StepsExecuted, "no step should have been invoked")
+
+		require.Error(t, out.Runnable(), "Runnable reports what Run declines to record")
+		assert.Contains(t, out.Runnable().Error(), "cannot be re-run")
 	})
 
 	// The probe is an internal detail; a consumer step must never receive it.
@@ -704,23 +706,52 @@ func TestAssessmentStepRoundTrip(t *testing.T) {
 	})
 }
 
-// TestDecodedLogRefusalIsInert checks that refusing to run a decoded log leaves
-// the record it was decoded from intact. Stamping Start before precheck gave a
-// refused log a fresh start beside its original end, so it read as having
-// finished five minutes before it began.
+// TestDecodedLogRefusalIsInert checks that Run leaves a decoded log exactly as it
+// was decoded. A decoded log is the record of a run that already happened, so
+// reporting "cannot be re-run" into its own result, message and confidence
+// destroyed the record the caller loaded.
 func TestDecodedLogRefusalIsInert(t *testing.T) {
 	const wire = `{"requirement":{"reference-id":"","entry-id":"r"},"description":"d",` +
-		`"result":"Passed","message":"m","applicability":["a"],` +
-		`"start":"2020-01-01T00:00:00Z","end":"2020-01-01T00:05:00Z",` +
-		`"steps-executed":1,"steps":["pkg.Step"]}`
+		`"result":"Passed","message":"all checks passed","applicability":["a"],` +
+		`"confidence-level":"High","start":"2020-01-01T00:00:00Z","end":"2020-01-01T00:05:00Z",` +
+		`"steps-executed":3,"steps":["pkg.StepA"]}`
 
 	var log AssessmentLog
 	require.NoError(t, json.Unmarshal([]byte(wire), &log))
+	before := log
 
-	assert.Equal(t, Unknown, log.Run(nil))
-	assert.Equal(t, Datetime("2020-01-01T00:00:00Z"), log.Start, "a refused log keeps its recorded start")
-	assert.Equal(t, Datetime("2020-01-01T00:05:00Z"), log.End, "and its recorded end")
-	assert.Contains(t, log.Message, "cannot be re-run")
+	assert.Equal(t, Unknown, log.Run(nil), "a decoded log cannot be run")
+
+	assert.Equal(t, before.Result, log.Result, "Run must not overwrite the recorded result")
+	assert.Equal(t, before.Message, log.Message, "...nor the recorded message")
+	assert.Equal(t, before.ConfidenceLevel, log.ConfidenceLevel, "...nor the recorded confidence")
+	assert.Equal(t, before.Start, log.Start, "...nor the recorded start")
+	assert.Equal(t, before.End, log.End, "...nor the recorded end")
+	assert.Equal(t, before.StepsExecuted, log.StepsExecuted, "...nor the step count")
+
+	require.Error(t, log.Runnable(), "Runnable reports what Run declines to record")
+	assert.Contains(t, log.Runnable().Error(), "cannot be re-run")
+}
+
+// TestRunnable covers the check callers make before Run.
+func TestRunnable(t *testing.T) {
+	ok, err := NewAssessment("r", "d", testingApplicability, []AssessmentStep{passingAssessmentStep})
+	require.NoError(t, err)
+	assert.NoError(t, ok.Runnable(), "an in-process assessment is runnable")
+
+	nilStep := &AssessmentLog{Steps: []AssessmentStep{passingAssessmentStep, nil}}
+	require.Error(t, nilStep.Runnable())
+	assert.Contains(t, nilStep.Runnable().Error(), "step 1 is nil")
+
+	var decoded AssessmentStep
+	require.NoError(t, json.Unmarshal([]byte(`"pkg.StepA"`), &decoded))
+	fromLog := &AssessmentLog{Steps: []AssessmentStep{decoded}}
+	require.Error(t, fromLog.Runnable())
+	assert.Contains(t, fromLog.Runnable().Error(), "pkg.StepA")
+
+	// Runnable must not itself mutate.
+	assert.Equal(t, NotRun, fromLog.Result)
+	assert.Empty(t, fromLog.Message)
 }
 
 // TestAssessmentStepNullDecodesToNil checks that a null step stays nil instead
